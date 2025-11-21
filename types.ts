@@ -1,4 +1,18 @@
+/**
+ * DOMAIN MODEL: OMNIPOST CREATOR
+ * * This file defines the strict type boundaries for the application core.
+ * Utilizes Branded Types for ID safety and Discriminated Unions for state handling.
+ */
 
+// -- BRANDED TYPES (High Signal: Prevents primitive obsession) --
+export type CampaignId = string & { readonly __brand: unique symbol };
+export type UserId = string & { readonly __brand: unique symbol };
+export type ImageUrl = string & { readonly __brand: unique symbol };
+
+export const createCampaignId = (id: string) => id as CampaignId;
+export const createImageUrl = (url: string) => url as ImageUrl;
+
+// -- CORE ENUMS --
 export enum Platform {
   LINKEDIN = 'LinkedIn',
   TWITTER = 'Twitter',
@@ -10,7 +24,9 @@ export enum Tone {
   WITTY = 'Witty',
   URGENT = 'Urgent',
   INSPIRATIONAL = 'Inspirational',
-  CASUAL = 'Casual'
+  CASUAL = 'Casual',
+  AUTHORITATIVE = 'Authoritative',
+  EMPATHETIC = 'Empathetic'
 }
 
 export enum ImageSize {
@@ -30,45 +46,50 @@ export enum AspectRatio {
   RATIO_21_9 = '21:9'
 }
 
+// -- DISCRIMINATED UNIONS FOR IMAGE STATE (High Signal: Exhaustive handling) --
+export type ImageVariantState = 
+  | { status: 'IDLE' }
+  | { status: 'LOADING'; startTime: number }
+  | { status: 'SUCCESS'; url: ImageUrl; metadata: { width?: number; height?: number } }
+  | { status: 'ERROR'; error: Error; retryCount: number };
+
 export interface ImageVariant {
-  url: string | null;
-  isLoading: boolean;
-  error?: boolean;
+  id: string;
+  state: ImageVariantState;
 }
 
+// -- COMPOSITE ENTITIES --
 export interface GeneratedPost {
-  platform: Platform;
-  content: string;
-  images: ImageVariant[];
-  selectedImageIndex: number;
-  error?: string;
+  readonly id: string;
+  readonly platform: Platform;
+  readonly content: string;
+  readonly images: ImageVariant[];
+  readonly selectedImageIndex: number;
+  readonly metadata: {
+    generatedAt: string; // ISO Date
+    modelVersion: string;
+    tokenUsage?: number;
+  };
 }
 
 export interface ScheduledPost extends GeneratedPost {
-  id: string;
+  readonly scheduleId: string;
   scheduledDate: string; // ISO string
 }
 
 export interface SavedPost extends GeneratedPost {
-  id: string;
+  readonly saveId: string;
   savedDate: string; // ISO string
 }
 
+// -- SERVICE REQUEST OBJECTS --
 export interface GenerateRequest {
   idea: string;
   tone: Tone;
   audience: string;
   imageSize: ImageSize;
-  // Optional manual overrides
-  aspectRatios: {
-    [key in Platform]: AspectRatio;
-  };
-}
-
-export interface SocialContentResponse {
-  linkedin: string;
-  twitter: string;
-  instagram: string;
+  aspectRatios: Record<Platform, AspectRatio>;
+  enableSearchGrounding?: boolean; // Feature flag for future
 }
 
 export interface AnalyticsMetrics {
@@ -76,5 +97,8 @@ export interface AnalyticsMetrics {
   reach: number;
   engagementRate: number;
   clicks: number;
-  history: number[]; // Mock data for sparkline
+  history: number[]; 
+  // Add derived metrics for density
+  ctr?: number;
+  cpm?: number;
 }

@@ -1,7 +1,7 @@
-
-import React, { useState } from 'react';
-import { Copy, Check, Download, Loader2, Image as ImageIcon, Calendar, X, Save, Hash, ChevronLeft, ChevronRight } from 'lucide-react';
-import { Platform, GeneratedPost } from '../types';
+import React, { useState, useMemo } from 'react';
+import { Copy, Check, Download, Loader2, Image as ImageIcon, Calendar, X, Save, Hash, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react';
+import { Platform, GeneratedPost, ImageUrl, createImageUrl } from '../types';
+import { geminiService } from '../services/geminiService';
 
 interface PostCardProps {
   post: GeneratedPost;
@@ -9,6 +9,8 @@ interface PostCardProps {
   onSave?: () => void;
   onSuggestHashtags?: () => Promise<string>;
   onImageSelect?: (index: number) => void;
+  onUpdate?: (updatedPost: GeneratedPost) => void;
+  onDelete?: () => void;
   scheduledDate?: string;
   isSavedView?: boolean;
 }
@@ -36,14 +38,27 @@ const PlatformIcon: React.FC<{ platform: Platform }> = ({ platform }) => {
   }
 };
 
-export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, onSuggestHashtags, onImageSelect, scheduledDate, isSavedView }) => {
+export const PostCard: React.FC<PostCardProps> = ({ 
+  post, 
+  onSchedule, 
+  onSave, 
+  onSuggestHashtags, 
+  onImageSelect, 
+  onUpdate,
+  onDelete,
+  scheduledDate, 
+  isSavedView 
+}) => {
   const [copied, setCopied] = useState(false);
   const [isScheduling, setIsScheduling] = useState(false);
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [selectedDate, setSelectedDate] = useState('');
   const [hashtagsLoading, setHashtagsLoading] = useState(false);
 
-  const currentImage = post.images?.[post.selectedImageIndex];
+  const currentImage = post.images[post.selectedImageIndex];
+
+  // Calculate Virality Score using the singleton service
+  const viralityScore = useMemo(() => geminiService.calculateViralityScore(post.content), [post.content]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(post.content);
@@ -52,9 +67,9 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
   };
 
   const handleDownloadImage = () => {
-    if (currentImage && currentImage.url) {
+    if (currentImage && currentImage.state.status === 'SUCCESS') {
       const link = document.createElement('a');
-      link.href = currentImage.url;
+      link.href = currentImage.state.url;
       link.download = `omnipost-${post.platform.toLowerCase()}.png`;
       document.body.appendChild(link);
       link.click();
@@ -80,6 +95,53 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
     }
   };
 
+  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      if (onUpdate) {
+          onUpdate({ ...post, content: e.target.value });
+      }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file && onUpdate) {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+              const base64 = reader.result as string;
+              const newImages = [...post.images];
+              
+              const newVariant = { 
+                ...newImages[post.selectedImageIndex], 
+                state: { 
+                    status: 'SUCCESS' as const, 
+                    url: createImageUrl(base64),
+                    metadata: {}
+                } 
+              };
+              newImages[post.selectedImageIndex] = newVariant;
+              
+              onUpdate({ ...post, images: newImages });
+          };
+          reader.readAsDataURL(file);
+      }
+  };
+
+  const handleShare = () => {
+      let url = '';
+      const text = encodeURIComponent(post.content);
+      switch (post.platform) {
+          case Platform.LINKEDIN:
+              url = `https://www.linkedin.com/feed/?shareActive=true&text=${text}`;
+              break;
+          case Platform.TWITTER:
+              url = `https://twitter.com/intent/tweet?text=${text}`;
+              break;
+          case Platform.INSTAGRAM:
+              url = `https://www.instagram.com/`;
+              break;
+      }
+      window.open(url, '_blank');
+  };
+
   return (
     <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl overflow-hidden flex flex-col h-full transition-all hover:border-zinc-700 group/card shadow-sm hover:shadow-lg hover:shadow-indigo-900/10 relative">
       
@@ -89,10 +151,14 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
             <PlatformIcon platform={post.platform} />
             <div className="flex flex-col">
                 <h3 className="font-semibold text-zinc-200">{post.platform}</h3>
-                {scheduledDate && (
+                {scheduledDate ? (
                     <span className="text-xs text-indigo-400 flex items-center gap-1">
                         <Calendar className="w-3 h-3" /> {new Date(scheduledDate).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                     </span>
+                ) : (
+                    <div className="flex items-center gap-1 text-xs font-medium text-amber-400/80" title="Predicted Virality Score">
+                       <TrendingUp className="w-3 h-3" /> Score: {viralityScore}
+                    </div>
                 )}
             </div>
         </div>
@@ -126,12 +192,21 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
                 </button>
             )}
             <button 
-            onClick={handleCopy}
-            className="p-2 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-md transition-colors"
-            title="Copy text"
+                onClick={handleCopy}
+                className="p-2 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-md transition-colors"
+                title="Copy text"
             >
-            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
             </button>
+             {onDelete && (
+                <button 
+                    onClick={onDelete}
+                    className="p-2 text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
+                    title="Delete"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            )}
         </div>
       </div>
 
@@ -199,16 +274,28 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
 
       {/* Content Area */}
       <div className="flex-1 p-4 flex flex-col gap-4">
-        {/* Text Content */}
-        <div className="flex-1">
-            <p className="text-zinc-300 whitespace-pre-wrap text-sm leading-relaxed font-light">
-                {post.content}
-            </p>
+        {/* Editable Text Content */}
+        <div className="flex-1 relative">
+            <textarea 
+                value={post.content}
+                onChange={handleContentChange}
+                className="w-full h-full min-h-[100px] bg-transparent text-zinc-300 text-sm leading-relaxed font-light resize-none focus:outline-none focus:bg-zinc-800/30 rounded-md p-2 -ml-2 transition-colors"
+                spellCheck={false}
+            />
         </div>
 
         {/* Image Section */}
         <div className="relative w-full rounded-lg overflow-hidden bg-zinc-950 border border-zinc-800 group aspect-video flex items-center justify-center">
             
+            {/* Image Upload Input */}
+            <input 
+                type="file" 
+                accept="image/*"
+                id={`upload-${post.platform}-${post.id}`}
+                className="hidden"
+                onChange={handleImageUpload}
+            />
+
             {/* Navigation (Always visible if multiple images) */}
             {post.images && post.images.length > 1 && onImageSelect && (
                 <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/60 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 z-20 shadow-xl">
@@ -238,22 +325,31 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
                 </div>
             )}
 
-            {/* Download Button (Always visible if url exists) */}
-            {currentImage?.url && !currentImage.isLoading && (
-                <div className="absolute top-3 right-3 z-20">
+            {/* Top Right Actions */}
+            <div className="absolute top-3 right-3 z-20 flex gap-2">
+                {/* Upload Button Overlay */}
+                 <label 
+                    htmlFor={`upload-${post.platform}-${post.id}`}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md border border-white/10 text-white text-xs rounded-full font-medium hover:bg-black/80 transition-colors shadow-lg cursor-pointer"
+                    title="Upload Custom Image"
+                >
+                    <ImageIcon className="w-3 h-3" />
+                </label>
+
+                {/* Download Button (Always visible if url exists) */}
+                {currentImage && currentImage.state.status === 'SUCCESS' && (
                     <button 
                         onClick={handleDownloadImage}
                         className="flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md border border-white/10 text-white text-xs rounded-full font-medium hover:bg-black/80 transition-colors shadow-lg"
                         title="Download Image"
                     >
                         <Download className="w-3 h-3" /> 
-                        <span className="hidden sm:inline">Download</span>
                     </button>
-                </div>
-            )}
+                )}
+            </div>
 
             {/* Content Layer */}
-            {currentImage?.isLoading ? (
+            {currentImage?.state.status === 'LOADING' ? (
                 <div className="flex flex-col items-center gap-3 text-zinc-400 z-10 animate-in fade-in duration-300">
                     <div className="relative">
                         <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
@@ -261,22 +357,39 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onSchedule, onSave, on
                     </div>
                     <span className="text-xs font-medium tracking-wide">Generating variation {(post.selectedImageIndex ?? 0) + 1}...</span>
                 </div>
-            ) : currentImage?.url ? (
+            ) : currentImage?.state.status === 'SUCCESS' ? (
                 <img 
-                    src={currentImage.url} 
+                    src={currentImage.state.url} 
                     alt={`Generated for ${post.platform}`} 
                     className="w-full h-full object-contain bg-zinc-900/50"
                 />
             ) : (
-                // Placeholder Image (when empty or error)
-                <div className="w-full h-full flex items-center justify-center bg-zinc-900 relative">
+                // Placeholder Image (when empty or error or idle)
+                <label 
+                    htmlFor={`upload-${post.platform}-${post.id}`}
+                    className="w-full h-full flex flex-col items-center justify-center bg-zinc-900 relative cursor-pointer group/placeholder"
+                >
                     <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-zinc-800/30 to-transparent opacity-50"></div>
-                    <div className="flex flex-col items-center gap-2 z-10 opacity-30">
-                        <ImageIcon className="w-16 h-16 text-zinc-500" />
-                        <span className="text-xs font-medium text-zinc-600 uppercase tracking-widest">No Image</span>
+                    <div className="flex flex-col items-center gap-3 z-10">
+                        <div className="p-3 bg-zinc-800 rounded-full group-hover/placeholder:bg-zinc-700 transition-colors">
+                            <ImageIcon className="w-8 h-8 text-zinc-500 group-hover/placeholder:text-zinc-400" />
+                        </div>
+                        <span className="text-xs font-medium text-zinc-500 group-hover/placeholder:text-zinc-400 uppercase tracking-widest">
+                            {currentImage?.state.status === 'ERROR' ? 'Generation Failed' : 'Upload Image'}
+                        </span>
                     </div>
-                </div>
+                </label>
             )}
+        </div>
+
+        {/* Footer Actions */}
+        <div className="pt-2 mt-auto border-t border-zinc-800/50 flex justify-end">
+             <button 
+                onClick={handleShare}
+                className="text-xs font-medium text-zinc-400 hover:text-indigo-400 flex items-center gap-1.5 px-3 py-1.5 hover:bg-indigo-500/10 rounded-lg transition-colors"
+             >
+                 Share to {post.platform} <ChevronRight className="w-3 h-3" />
+             </button>
         </div>
       </div>
     </div>

@@ -1,10 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
 import { ApiKeyBanner } from './components/ApiKeyBanner';
 import { PostCard } from './components/PostCard';
-import { generateSocialText, generateSocialImageVariant, generateAnalyticsInsights, generateHashtags } from './services/geminiService';
-import { GeneratedPost, Platform, Tone, ImageSize, AspectRatio, ScheduledPost, AnalyticsMetrics, SavedPost } from './types';
-import { Sparkles, Send, ChevronDown, ChevronUp, Wand2, Loader2, LayoutDashboard, Calendar as CalendarIcon, PenTool, TrendingUp, Users, MousePointer2, Eye, Bookmark } from 'lucide-react';
+import { geminiService, GeminiContentOrchestrator } from './services/geminiService';
+import { GeneratedPost, Platform, Tone, ImageSize, AspectRatio, ScheduledPost, AnalyticsMetrics, SavedPost, ImageVariant, createCampaignId, createImageUrl } from './types';
+import { Sparkles, Send, Wand2, Loader2, LayoutDashboard, Calendar as CalendarIcon, PenTool, Users, MousePointer2, Eye, Bookmark, TrendingUp } from 'lucide-react';
 
 const DEFAULT_ASPECT_RATIOS = {
   [Platform.LINKEDIN]: AspectRatio.RATIO_4_3,
@@ -21,21 +20,42 @@ const INITIAL_METRICS: AnalyticsMetrics = {
     history: [4500, 5200, 4800, 6100, 5900, 7200, 8500]
 };
 
-// Helper to migrate old data structure to new if necessary
+// Helper to migrate old data structure to new strict DDD types
 const migratePostData = (data: any[]): any[] => {
     if (!Array.isArray(data)) return [];
     return data.map(post => {
-        if (!post.images || post.images.length === 0) {
-             return { ...post, images: [] };
+        // Migration logic for images
+        let newImages: ImageVariant[] = [];
+        if (Array.isArray(post.images)) {
+             newImages = post.images.map((img: any, idx: number) => {
+                 // Handle old string array format
+                 if (typeof img === 'string') {
+                     return {
+                         id: `migrated-${idx}`,
+                         state: { status: 'SUCCESS', url: createImageUrl(img), metadata: {} }
+                     };
+                 }
+                 // Handle old object format { url, isLoading, error }
+                 if (img.url) {
+                     return {
+                         id: `migrated-${idx}`,
+                         state: { status: 'SUCCESS', url: createImageUrl(img.url), metadata: {} }
+                     };
+                 }
+                 return {
+                     id: `migrated-${idx}`,
+                     state: { status: 'IDLE' }
+                 };
+             });
         }
-        // Check if images are strings (old format)
-        if (typeof post.images[0] === 'string') {
-            return {
-                ...post,
-                images: post.images.map((url: string) => ({ url, isLoading: false, error: false }))
-            };
-        }
-        return post;
+        
+        return {
+            ...post,
+            // Ensure id matches Branded Type constraint (at runtime it's just a string)
+            id: post.id || Math.random().toString(36).substring(7),
+            images: newImages,
+            metadata: post.metadata || { generatedAt: new Date().toISOString(), modelVersion: 'legacy' }
+        };
     });
 };
 
@@ -106,75 +126,105 @@ const App: React.FC = () => {
     e.preventDefault();
     if (!idea.trim() || !apiKeySelected) return;
 
+    // Transition State: LOCKED
     setIsGenerating(true);
+    const orchestrator = GeminiContentOrchestrator.getInstance();
 
-    // Initialize results with placeholders for images
-    const initialImages = [
-        { url: null, isLoading: true },
-        { url: null, isLoading: true }
+    // Initial State setup for Images (Loading placeholders)
+    const initialImages: ImageVariant[] = [
+        { id: 'var-1', state: { status: 'LOADING', startTime: Date.now() } },
+        { id: 'var-2', state: { status: 'LOADING', startTime: Date.now() } }
     ];
 
-    setResults({
-      [Platform.LINKEDIN]: { platform: Platform.LINKEDIN, content: '', images: [...initialImages], selectedImageIndex: 0 },
-      [Platform.TWITTER]: { platform: Platform.TWITTER, content: '', images: [...initialImages], selectedImageIndex: 0 },
-      [Platform.INSTAGRAM]: { platform: Platform.INSTAGRAM, content: '', images: [...initialImages], selectedImageIndex: 0 },
+    // Initialize results with IDLE/LOADING structure
+    const newResults: any = {};
+    Object.values(Platform).forEach(p => {
+        newResults[p] = {
+            id: createCampaignId(`${p}-${Date.now()}`),
+            platform: p,
+            content: '',
+            images: initialImages,
+            selectedImageIndex: 0,
+            metadata: { generatedAt: new Date().toISOString(), modelVersion: 'v1' }
+        };
     });
+    setResults(newResults);
 
     try {
-      // 1. Generate Text Content (Fastest)
-      const textContent = await generateSocialText(idea, tone, audience);
+      // Phase 1: Semantic Text Generation
+      const textCampaign = await orchestrator.generateCampaignText(idea, tone, audience);
 
       setResults(prev => ({
-        [Platform.LINKEDIN]: { ...prev[Platform.LINKEDIN]!, content: textContent.linkedin },
-        [Platform.TWITTER]: { ...prev[Platform.TWITTER]!, content: textContent.twitter },
-        [Platform.INSTAGRAM]: { ...prev[Platform.INSTAGRAM]!, content: textContent.instagram },
+        [Platform.LINKEDIN]: { ...prev[Platform.LINKEDIN]!, content: textCampaign.linkedin },
+        [Platform.TWITTER]: { ...prev[Platform.TWITTER]!, content: textCampaign.twitter },
+        [Platform.INSTAGRAM]: { ...prev[Platform.INSTAGRAM]!, content: textCampaign.instagram },
       }));
 
-      // 2. Generate Images in Parallel (Individually tracked)
+      // Phase 2: Parallel Visual Synthesis
       const platforms = [Platform.LINKEDIN, Platform.TWITTER, Platform.INSTAGRAM];
       
-      // Fire off all image requests
-      platforms.forEach(platform => {
-          [0, 1].forEach(async (index) => {
-              try {
-                  const imageUrl = await generateSocialImageVariant(
-                      idea, 
-                      platform, 
-                      tone, 
-                      aspectRatios[platform], 
-                      imageSize, 
-                      audience, 
-                      index
-                  );
+      // Use Promise.allSettled for robust parallel execution
+      await Promise.allSettled(platforms.flatMap(platform => 
+        [0, 1].map(async (index) => {
+           try {
+               const imageUrl = await orchestrator.generateVisualAsset(
+                   idea, 
+                   platform, 
+                   tone, 
+                   aspectRatios[platform], 
+                   imageSize, 
+                   audience, 
+                   index
+               );
 
-                  setResults(prev => {
-                      const currentPost = prev[platform];
-                      if (!currentPost) return prev;
-                      const newImages = [...currentPost.images];
-                      newImages[index] = { url: imageUrl, isLoading: false, error: false };
-                      return {
-                          ...prev,
-                          [platform]: { ...currentPost, images: newImages }
-                      };
-                  });
-              } catch (err) {
-                  console.error(`Error generating image ${index} for ${platform}`, err);
-                  setResults(prev => {
-                    const currentPost = prev[platform];
-                    if (!currentPost) return prev;
-                    const newImages = [...currentPost.images];
-                    newImages[index] = { url: null, isLoading: false, error: true };
-                    return {
-                        ...prev,
-                        [platform]: { ...currentPost, images: newImages }
-                    };
-                  });
-              }
-          });
-      });
+               // Functional State Update for Thread Safety
+               setResults(prev => {
+                   const currentPost = prev[platform];
+                   if (!currentPost) return prev;
+                   
+                   // Create deep copy of image array to maintain immutability
+                   const newImages = [...currentPost.images];
+                   newImages[index] = {
+                       id: `gen-${platform}-${index}`,
+                       state: { 
+                           status: 'SUCCESS', 
+                           url: createImageUrl(imageUrl), 
+                           metadata: {} 
+                        }
+                   };
+
+                   return {
+                       ...prev,
+                       [platform]: { ...currentPost, images: newImages }
+                   };
+               });
+
+           } catch (error: any) {
+               console.warn(`Image gen failed for ${platform} idx ${index}`, error);
+               setResults(prev => {
+                   const currentPost = prev[platform];
+                   if (!currentPost) return prev;
+                   const newImages = [...currentPost.images];
+                   newImages[index] = {
+                       id: `err-${platform}-${index}`,
+                       state: { 
+                           status: 'ERROR', 
+                           error: error, 
+                           retryCount: 1 
+                        }
+                   };
+                   return {
+                       ...prev,
+                       [platform]: { ...currentPost, images: newImages }
+                   };
+               });
+           }
+        })
+      ));
 
     } catch (error) {
-      console.error("Main generation error:", error);
+      console.error("Orchestration Failure:", error);
+      // Could set a global error state here if needed
     } finally {
       setIsGenerating(false);
     }
@@ -183,7 +233,7 @@ const App: React.FC = () => {
   const handleSchedule = (post: GeneratedPost, date: string) => {
     const newScheduledPost: ScheduledPost = {
         ...post,
-        id: Math.random().toString(36).substring(7),
+        scheduleId: Math.random().toString(36).substring(7),
         scheduledDate: date
     };
     setScheduledPosts(prev => [...prev, newScheduledPost].sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime()));
@@ -193,7 +243,7 @@ const App: React.FC = () => {
   const handleSave = (post: GeneratedPost) => {
       const newSavedPost: SavedPost = {
           ...post,
-          id: Math.random().toString(36).substring(7),
+          saveId: Math.random().toString(36).substring(7),
           savedDate: new Date().toISOString()
       };
       setSavedPosts(prev => [newSavedPost, ...prev]);
@@ -202,7 +252,7 @@ const App: React.FC = () => {
   const handleAnalyze = async () => {
       setIsAnalyzing(true);
       try {
-          const insights = await generateAnalyticsInsights(metrics);
+          const insights = await geminiService.generateAnalyticsInsights(metrics);
           setAiInsights(insights);
       } catch (error) {
           console.error(error);
@@ -216,11 +266,10 @@ const App: React.FC = () => {
   };
 
   const handleSuggestHashtags = async (platform: Platform, content: string) => {
-    const hashtags = await generateHashtags(content, platform, audience);
+    const hashtags = await geminiService.generateHashtags(content, platform, audience);
     setResults(prev => {
         const current = prev[platform];
         if (!current) return prev;
-        // Append hashtags if not already there (simple check)
         if (!current.content.includes(hashtags.trim())) {
              return {
                 ...prev,
@@ -237,6 +286,38 @@ const App: React.FC = () => {
           ...prev,
           [platform]: { ...prev[platform]!, selectedImageIndex: index }
       }));
+  };
+
+  const handleResultUpdate = (updatedPost: GeneratedPost) => {
+      setResults(prev => ({
+          ...prev,
+          [updatedPost.platform]: updatedPost
+      }));
+  };
+
+  const handleResultDelete = (platform: Platform) => {
+      setResults(prev => ({
+          ...prev,
+          [platform]: null
+      }));
+  };
+
+  // Handlers for Scheduled Posts
+  const handleScheduledUpdate = (updatedPost: GeneratedPost) => {
+      setScheduledPosts(prev => prev.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
+  };
+
+  const handleScheduledDelete = (id: string) => {
+      setScheduledPosts(prev => prev.filter(p => p.id !== id));
+  };
+
+  // Handlers for Saved Posts
+  const handleSavedUpdate = (updatedPost: GeneratedPost) => {
+      setSavedPosts(prev => prev.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
+  };
+
+  const handleSavedDelete = (id: string) => {
+      setSavedPosts(prev => prev.filter(p => p.id !== id));
   };
 
   return (
@@ -433,14 +514,18 @@ const App: React.FC = () => {
                 {(results[Platform.LINKEDIN] || isGenerating) && (
                     <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {Object.values(Platform).map(platform => (
-                            <PostCard 
-                                key={platform}
-                                post={results[platform] || { platform, content: '', images: [], selectedImageIndex: 0 }} 
-                                onSchedule={(date) => results[platform] && handleSchedule(results[platform]!, date)}
-                                onSave={() => results[platform] && handleSave(results[platform]!)}
-                                onSuggestHashtags={() => results[platform] ? handleSuggestHashtags(platform, results[platform]!.content) : Promise.resolve("")}
-                                onImageSelect={(idx) => handleImageSelect(platform, idx)}
-                            />
+                             results[platform] ? (
+                                <PostCard 
+                                    key={platform}
+                                    post={results[platform]!} 
+                                    onSchedule={(date) => results[platform] && handleSchedule(results[platform]!, date)}
+                                    onSave={() => results[platform] && handleSave(results[platform]!)}
+                                    onSuggestHashtags={() => results[platform] ? handleSuggestHashtags(platform, results[platform]!.content) : Promise.resolve("")}
+                                    onImageSelect={(idx) => handleImageSelect(platform, idx)}
+                                    onUpdate={handleResultUpdate}
+                                    onDelete={() => handleResultDelete(platform)}
+                                />
+                             ) : null
                         ))}
                     </section>
                 )}
@@ -480,6 +565,8 @@ const App: React.FC = () => {
                                     const newPosts = scheduledPosts.map(p => p.id === post.id ? { ...p, selectedImageIndex: idx } : p);
                                     setScheduledPosts(newPosts);
                                 }}
+                                onUpdate={handleScheduledUpdate}
+                                onDelete={() => handleScheduledDelete(post.id)}
                             />
                         ))}
                     </div>
@@ -513,6 +600,8 @@ const App: React.FC = () => {
                                     const newSaved = savedPosts.map(p => p.id === post.id ? { ...p, selectedImageIndex: idx } : p);
                                     setSavedPosts(newSaved);
                                 }}
+                                onUpdate={handleSavedUpdate}
+                                onDelete={() => handleSavedDelete(post.id)}
                             />
                         ))}
                     </div>
