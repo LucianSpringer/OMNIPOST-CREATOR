@@ -1,0 +1,5 @@
+{
+  "name": "OmniPost Creator",
+  "description": "A cross-platform social media content generator that creates tailored text and images for LinkedIn, Twitter, and Instagram using Gemini 3 Pro.",
+  "requestFramePermissions": []
+}
