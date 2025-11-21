@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { ApiKeyBanner } from './components/ApiKeyBanner';
 import { PostCard } from './components/PostCard';
 import { geminiService, GeminiContentOrchestrator } from './services/geminiService';
+import { analytics } from './services/telemetryService';
 import { GeneratedPost, Platform, Tone, ImageSize, AspectRatio, ScheduledPost, AnalyticsMetrics, SavedPost, ImageVariant, createCampaignId, createImageUrl } from './types';
 import { Sparkles, Send, Wand2, Loader2, LayoutDashboard, Calendar as CalendarIcon, PenTool, Users, MousePointer2, Eye, Bookmark, TrendingUp } from 'lucide-react';
+import { usePersistentStore } from './hooks/usePersistentStore';
 
 const DEFAULT_ASPECT_RATIOS = {
   [Platform.LINKEDIN]: AspectRatio.RATIO_4_3,
@@ -81,9 +83,20 @@ const App: React.FC = () => {
     [Platform.INSTAGRAM]: null,
   });
 
-  // Calendar & Saved State
-  const [scheduledPosts, setScheduledPosts] = useState<ScheduledPost[]>([]);
-  const [savedPosts, setSavedPosts] = useState<SavedPost[]>([]);
+  // Persistence Hooks
+  const { 
+      items: scheduledPosts, 
+      addSorted: addScheduledPost, 
+      update: updateScheduledPost, 
+      remove: removeScheduledPost 
+  } = usePersistentStore<ScheduledPost>('omnipost_scheduled', migratePostData);
+
+  const { 
+      items: savedPosts, 
+      addHead: addSavedPost, 
+      update: updateSavedPost, 
+      remove: removeSavedPost 
+  } = usePersistentStore<SavedPost>('omnipost_saved', migratePostData);
 
   // Analytics State
   const [metrics, setMetrics] = useState<AnalyticsMetrics>(INITIAL_METRICS);
@@ -101,27 +114,6 @@ const App: React.FC = () => {
       'Sustainable Living Advocates'
   ];
 
-  // Load data from local storage on mount
-  useEffect(() => {
-    try {
-        const loadedScheduled = localStorage.getItem('omnipost_scheduled');
-        const loadedSaved = localStorage.getItem('omnipost_saved');
-        if (loadedScheduled) setScheduledPosts(migratePostData(JSON.parse(loadedScheduled)));
-        if (loadedSaved) setSavedPosts(migratePostData(JSON.parse(loadedSaved)));
-    } catch (e) {
-        console.error("Failed to load or migrate local storage data", e);
-    }
-  }, []);
-
-  // Persist to local storage on change
-  useEffect(() => {
-    localStorage.setItem('omnipost_scheduled', JSON.stringify(scheduledPosts));
-  }, [scheduledPosts]);
-
-  useEffect(() => {
-    localStorage.setItem('omnipost_saved', JSON.stringify(savedPosts));
-  }, [savedPosts]);
-
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!idea.trim() || !apiKeySelected) return;
@@ -130,13 +122,12 @@ const App: React.FC = () => {
     setIsGenerating(true);
     const orchestrator = GeminiContentOrchestrator.getInstance();
 
-    // Initial State setup for Images (Loading placeholders)
+    // Initialize results with IDLE/LOADING structure
     const initialImages: ImageVariant[] = [
         { id: 'var-1', state: { status: 'LOADING', startTime: Date.now() } },
         { id: 'var-2', state: { status: 'LOADING', startTime: Date.now() } }
     ];
 
-    // Initialize results with IDLE/LOADING structure
     const newResults: any = {};
     Object.values(Platform).forEach(p => {
         newResults[p] = {
@@ -159,6 +150,14 @@ const App: React.FC = () => {
         [Platform.TWITTER]: { ...prev[Platform.TWITTER]!, content: textCampaign.twitter },
         [Platform.INSTAGRAM]: { ...prev[Platform.INSTAGRAM]!, content: textCampaign.instagram },
       }));
+      
+      // Track generation event
+      analytics.track('CAMPAIGN_GENERATED', {
+          tone,
+          audience,
+          ideaLength: idea.length,
+          model: "gemini-3-pro-preview"
+      });
 
       // Phase 2: Parallel Visual Synthesis
       const platforms = [Platform.LINKEDIN, Platform.TWITTER, Platform.INSTAGRAM];
@@ -177,12 +176,10 @@ const App: React.FC = () => {
                    index
                );
 
-               // Functional State Update for Thread Safety
                setResults(prev => {
                    const currentPost = prev[platform];
                    if (!currentPost) return prev;
                    
-                   // Create deep copy of image array to maintain immutability
                    const newImages = [...currentPost.images];
                    newImages[index] = {
                        id: `gen-${platform}-${index}`,
@@ -224,7 +221,6 @@ const App: React.FC = () => {
 
     } catch (error) {
       console.error("Orchestration Failure:", error);
-      // Could set a global error state here if needed
     } finally {
       setIsGenerating(false);
     }
@@ -236,7 +232,14 @@ const App: React.FC = () => {
         scheduleId: Math.random().toString(36).substring(7),
         scheduledDate: date
     };
-    setScheduledPosts(prev => [...prev, newScheduledPost].sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime()));
+    addScheduledPost(newScheduledPost, (a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime());
+    
+    analytics.track('POST_SCHEDULED', {
+        platform: post.platform,
+        scheduledDate: date,
+        postId: post.id
+    });
+
     alert(`Scheduled for ${new Date(date).toLocaleString()}`);
   };
 
@@ -246,7 +249,7 @@ const App: React.FC = () => {
           saveId: Math.random().toString(36).substring(7),
           savedDate: new Date().toISOString()
       };
-      setSavedPosts(prev => [newSavedPost, ...prev]);
+      addSavedPost(newSavedPost);
   };
 
   const handleAnalyze = async () => {
@@ -302,22 +305,26 @@ const App: React.FC = () => {
       }));
   };
 
-  // Handlers for Scheduled Posts
   const handleScheduledUpdate = (updatedPost: GeneratedPost) => {
-      setScheduledPosts(prev => prev.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
+      const existing = scheduledPosts.find(p => p.id === updatedPost.id);
+      if (existing) {
+          updateScheduledPost({ ...existing, ...updatedPost });
+      }
   };
 
   const handleScheduledDelete = (id: string) => {
-      setScheduledPosts(prev => prev.filter(p => p.id !== id));
+      removeScheduledPost(id);
   };
 
-  // Handlers for Saved Posts
   const handleSavedUpdate = (updatedPost: GeneratedPost) => {
-      setSavedPosts(prev => prev.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
+      const existing = savedPosts.find(p => p.id === updatedPost.id);
+      if (existing) {
+          updateSavedPost({ ...existing, ...updatedPost });
+      }
   };
 
   const handleSavedDelete = (id: string) => {
-      setSavedPosts(prev => prev.filter(p => p.id !== id));
+      removeSavedPost(id);
   };
 
   return (
@@ -515,16 +522,23 @@ const App: React.FC = () => {
                     <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {Object.values(Platform).map(platform => (
                              results[platform] ? (
-                                <PostCard 
+                                <PostCard.Root 
                                     key={platform}
-                                    post={results[platform]!} 
-                                    onSchedule={(date) => results[platform] && handleSchedule(results[platform]!, date)}
-                                    onSave={() => results[platform] && handleSave(results[platform]!)}
-                                    onSuggestHashtags={() => results[platform] ? handleSuggestHashtags(platform, results[platform]!.content) : Promise.resolve("")}
-                                    onImageSelect={(idx) => handleImageSelect(platform, idx)}
+                                    post={results[platform]!}
                                     onUpdate={handleResultUpdate}
-                                    onDelete={() => handleResultDelete(platform)}
-                                />
+                                >
+                                    <PostCard.Header 
+                                        onSchedule={(date) => results[platform] && handleSchedule(results[platform]!, date)}
+                                        onSave={() => results[platform] && handleSave(results[platform]!)}
+                                        onSuggestHashtags={() => results[platform] ? handleSuggestHashtags(platform, results[platform]!.content) : Promise.resolve("")}
+                                        onDelete={() => handleResultDelete(platform)}
+                                    />
+                                    <PostCard.Content />
+                                    <PostCard.Visuals 
+                                        onImageSelect={(idx) => handleImageSelect(platform, idx)}
+                                    />
+                                    <PostCard.Toolbar />
+                                </PostCard.Root>
                              ) : null
                         ))}
                     </section>
@@ -557,17 +571,26 @@ const App: React.FC = () => {
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {scheduledPosts.map((post) => (
-                            <PostCard 
+                             <PostCard.Root 
                                 key={post.id} 
-                                post={post} 
-                                scheduledDate={post.scheduledDate}
-                                onImageSelect={(idx) => {
-                                    const newPosts = scheduledPosts.map(p => p.id === post.id ? { ...p, selectedImageIndex: idx } : p);
-                                    setScheduledPosts(newPosts);
-                                }}
+                                post={post}
                                 onUpdate={handleScheduledUpdate}
-                                onDelete={() => handleScheduledDelete(post.id)}
-                            />
+                            >
+                                <PostCard.Header 
+                                    scheduledDate={post.scheduledDate}
+                                    onDelete={() => handleScheduledDelete(post.id)}
+                                />
+                                <PostCard.Content />
+                                <PostCard.Visuals 
+                                    onImageSelect={(idx) => {
+                                        const existing = scheduledPosts.find(p => p.id === post.id);
+                                        if (existing) {
+                                            updateScheduledPost({ ...existing, selectedImageIndex: idx });
+                                        }
+                                    }}
+                                />
+                                <PostCard.Toolbar />
+                            </PostCard.Root>
                         ))}
                     </div>
                 )}
@@ -591,18 +614,27 @@ const App: React.FC = () => {
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {savedPosts.map((post) => (
-                            <PostCard 
+                            <PostCard.Root 
                                 key={post.id} 
-                                post={post} 
-                                isSavedView={true}
-                                onSchedule={(date) => handleSchedule(post, date)}
-                                onImageSelect={(idx) => {
-                                    const newSaved = savedPosts.map(p => p.id === post.id ? { ...p, selectedImageIndex: idx } : p);
-                                    setSavedPosts(newSaved);
-                                }}
+                                post={post}
                                 onUpdate={handleSavedUpdate}
-                                onDelete={() => handleSavedDelete(post.id)}
-                            />
+                            >
+                                <PostCard.Header 
+                                    isSavedView
+                                    onSchedule={(date) => handleSchedule(post, date)}
+                                    onDelete={() => handleSavedDelete(post.id)}
+                                />
+                                <PostCard.Content />
+                                <PostCard.Visuals 
+                                    onImageSelect={(idx) => {
+                                        const existing = savedPosts.find(p => p.id === post.id);
+                                        if (existing) {
+                                            updateSavedPost({ ...existing, selectedImageIndex: idx });
+                                        }
+                                    }}
+                                />
+                                <PostCard.Toolbar />
+                            </PostCard.Root>
                         ))}
                     </div>
                 )}
